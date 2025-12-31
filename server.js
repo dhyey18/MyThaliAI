@@ -14,12 +14,26 @@ const PORT = 5000;
 app.use(cors());
 app.use(express.json());
 
-mongoose.connect(process.env.MONGO_URI || 'mongodb+srv://pateldhyey418_db_user:UQZSbUPBN0Zk877e@cluster0.yb8dlob.mongodb.net/?appName=Cluster0', {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
-.then(() => console.log('MongoDB connected successfully'))
-.catch((err) => console.error('MongoDB connection error:', err));
+const startServer = async () => {
+  try {
+    await mongoose.connect(process.env.MONGO_URI || 'mongodb+srv://pateldhyey418_db_user:UQZSbUPBN0Zk877e@cluster0.yb8dlob.mongodb.net/?appName=Cluster0', {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+      serverSelectionTimeoutMS: 30000,
+      socketTimeoutMS: 45000,
+    });
+    console.log('MongoDB connected successfully');
+    
+    app.listen(PORT, () => {
+      console.log(`Server running on http://localhost:${PORT}`);
+    });
+  } catch (err) {
+    console.error('MongoDB connection error:', err);
+    process.exit(1);
+  }
+};
+
+startServer();
 
 const Meal = require('./models/Meal');
 
@@ -431,7 +445,4 @@ app.get('/tracker', (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-});
 
