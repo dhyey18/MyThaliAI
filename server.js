@@ -149,40 +149,64 @@ app.post('/analyze', upload.single('image'), async (req, res) => {
 
     let dietaryContext = '';
     if (dietaryPreference === 'Jain') {
-      dietaryContext = 'IMPORTANT: The user follows Jain dietary restrictions. If you detect onion, garlic, root vegetables (potato, carrot, radish), or any non-vegetarian items, explicitly warn the user in the advice section.';
+      dietaryContext = 'CRITICAL: User follows Jain diet. FORBIDDEN items: onion, garlic, root vegetables (potato, carrot, radish, beetroot, turnip), non-vegetarian items. If detected, add explicit warning in advice.';
     } else if (dietaryPreference === 'Vegan') {
-      dietaryContext = 'IMPORTANT: The user follows a Vegan diet. Ensure no animal products (dairy, ghee, paneer, yogurt) are present. If detected, warn in the advice section.';
+      dietaryContext = 'CRITICAL: User follows Vegan diet. FORBIDDEN: All dairy (milk, ghee, paneer, yogurt, butter, cheese), eggs, honey. If detected, warn in advice.';
     } else if (dietaryPreference === 'Keto') {
-      dietaryContext = 'IMPORTANT: The user follows a Keto diet. Highlight high-carb items (rice, roti, bread) and suggest alternatives in the advice section.';
+      dietaryContext = 'CRITICAL: User follows Keto diet. FLAG high-carb items (rice, roti, bread, potato) and suggest keto alternatives in advice. Target: <15g net carbs per meal.';
     } else if (dietaryPreference === 'High Protein') {
-      dietaryContext = 'IMPORTANT: The user wants high protein meals. Emphasize protein-rich items and suggest protein additions if the meal is low in protein.';
+      dietaryContext = 'CRITICAL: User wants high protein meals. Target minimum 25-30g protein per meal. Highlight protein-rich items and suggest additions if protein is low.';
     }
 
-    const systemPrompt = `You are an Indian Nutritionist. Analyze the image of the Indian meal (Thali). 
-    ${dietaryContext}
-    
-    Return strictly JSON with the following structure:
+    const systemPrompt = `You are an expert Indian nutritionist specializing in traditional Indian meals (Thalis). Analyze the meal image with high accuracy.
+
+ANALYSIS REQUIREMENTS:
+1. Identify EVERY food item visible - be specific (e.g., "Aloo Gobi" not just "Sabzi", "Dal Makhani" not just "Dal")
+2. Estimate portion sizes accurately using Indian standard portions:
+   - 1 Roti/Chapati: ~30g = 70-80 calories
+   - 1 Katori Dal (150ml): 120-150 calories
+   - 1 Katori Sabzi (100g): varies 50-200 calories based on type
+   - 1 Katori Rice (150g cooked): 200-220 calories
+   - 1 Papad: ~15g = 60-70 calories
+   - Raita/Curd: ~100g = 50-80 calories
+   - Salad: ~50g = 15-25 calories
+   - Pickle: ~10g = 10-20 calories
+   - Chutney: ~20g = 20-40 calories
+
+3. Consider cooking methods:
+   - Estimate oil/ghee used (typically 1-2 tsp per sabzi = 40-80 calories)
+   - Fried items have higher calories
+   - Gravy-based dishes have more calories than dry sabzis
+
+4. Calculate macros accurately:
+   - Protein: 4 calories per gram
+   - Carbs: 4 calories per gram  
+   - Fats: 9 calories per gram
+   - Total calories = (protein × 4) + (carbs × 4) + (fats × 9)
+
+${dietaryContext}
+
+Return ONLY valid JSON (no markdown, no code blocks, no explanations):
+{
+  "items": [
     {
-      "items": [
-        {
-          "name": "string",
-          "calories": number,
-          "protein": number,
-          "carbs": number,
-          "fats": number
-        }
-      ],
-      "total_calories": number,
-      "macros_summary": {
-        "protein": number,
-        "carbs": number,
-        "fats": number
-      },
-      "advice": "string"
+      "name": "Specific food name (e.g., 'Aloo Gobi', 'Dal Makhani', '2 Rotis')",
+      "calories": number,
+      "protein": number,
+      "carbs": number,
+      "fats": number
     }
-    
-    Identify all food items visible in the image (Roti, Dal, Sabzi, Rice, etc.) and provide accurate nutritional estimates. 
-    The advice should be brief and practical nutrition tips. ${dietaryPreference !== 'Standard' ? `Consider the user's ${dietaryPreference} dietary preference in your advice.` : ''}`;
+  ],
+  "total_calories": number,
+  "macros_summary": {
+    "protein": number,
+    "carbs": number,
+    "fats": number
+  },
+  "advice": "2-3 practical nutrition tips based on the meal analysis. ${dietaryPreference !== 'Standard' ? `Include ${dietaryPreference} specific recommendations.` : ''}"
+}
+
+CRITICAL: Ensure total_calories matches the sum of all item calories. Ensure macros_summary matches sum of all items' macros. Be precise and accurate.`;
 
     const modelNames = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-flash-latest', 'gemini-pro-latest', 'gemini-2.0-flash', 'gemini-2.5-flash-lite'];
     let result;
@@ -191,7 +215,14 @@ app.post('/analyze', upload.single('image'), async (req, res) => {
     for (const modelName of modelNames) {
       try {
         console.log(`Trying model: ${modelName}`);
-        const model = genAI.getGenerativeModel({ model: modelName });
+        const model = genAI.getGenerativeModel({ 
+          model: modelName,
+          generationConfig: {
+            temperature: 0.3,
+            topP: 0.9,
+            topK: 40,
+          }
+        });
         result = await model.generateContent([
           systemPrompt,
           {
@@ -219,16 +250,57 @@ app.post('/analyze', upload.single('image'), async (req, res) => {
 
     let jsonData;
     try {
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      let cleanText = text.trim();
+      cleanText = cleanText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      
+      const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         jsonData = JSON.parse(jsonMatch[0]);
       } else {
         throw new Error('No JSON found in response');
       }
+
+      if (!jsonData.items || !Array.isArray(jsonData.items)) {
+        throw new Error('Invalid response structure: missing items array');
+      }
+
+      const calculatedTotalCalories = jsonData.items.reduce((sum, item) => sum + (item.calories || 0), 0);
+      const calculatedProtein = jsonData.items.reduce((sum, item) => sum + (item.protein || 0), 0);
+      const calculatedCarbs = jsonData.items.reduce((sum, item) => sum + (item.carbs || 0), 0);
+      const calculatedFats = jsonData.items.reduce((sum, item) => sum + (item.fats || 0), 0);
+
+      const calorieDiff = Math.abs(calculatedTotalCalories - (jsonData.total_calories || 0));
+      if (calorieDiff > 50) {
+        console.warn(`Calorie mismatch: calculated ${calculatedTotalCalories}, reported ${jsonData.total_calories}. Using calculated value.`);
+        jsonData.total_calories = Math.round(calculatedTotalCalories);
+      }
+
+      const proteinDiff = Math.abs(calculatedProtein - (jsonData.macros_summary?.protein || 0));
+      const carbsDiff = Math.abs(calculatedCarbs - (jsonData.macros_summary?.carbs || 0));
+      const fatsDiff = Math.abs(calculatedFats - (jsonData.macros_summary?.fats || 0));
+
+      if (proteinDiff > 5 || carbsDiff > 5 || fatsDiff > 5) {
+        console.warn('Macro mismatch detected, using calculated values.');
+        jsonData.macros_summary = {
+          protein: Math.round(calculatedProtein * 10) / 10,
+          carbs: Math.round(calculatedCarbs * 10) / 10,
+          fats: Math.round(calculatedFats * 10) / 10
+        };
+      }
+
+      if (!jsonData.macros_summary) {
+        jsonData.macros_summary = {
+          protein: Math.round(calculatedProtein * 10) / 10,
+          carbs: Math.round(calculatedCarbs * 10) / 10,
+          fats: Math.round(calculatedFats * 10) / 10
+        };
+      }
+
     } catch (parseError) {
+      console.error('Parse error:', parseError);
       return res.status(500).json({ 
         error: 'Failed to parse AI response',
-        rawResponse: text 
+        rawResponse: text.substring(0, 500)
       });
     }
 
