@@ -36,6 +36,7 @@ const startServer = async () => {
 startServer();
 
 const Meal = require('./models/Meal');
+const FavoriteMeal = require('./models/FavoriteMeal');
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -516,5 +517,252 @@ app.get('/tracker', (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+app.get('/meals/export/csv', async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    let query = {};
+    
+    if (startDate && endDate) {
+      query.timestamp = {
+        $gte: new Date(startDate),
+        $lte: new Date(endDate)
+      };
+    }
+    
+    const meals = await Meal.find(query).sort({ timestamp: -1 }).lean();
+    
+    const csvHeaders = 'Date,Meal Type,Dietary Preference,Total Calories,Protein (g),Carbs (g),Fats (g),Items,Advice\n';
+    const csvRows = meals.map(meal => {
+      const date = new Date(meal.timestamp).toISOString().split('T')[0];
+      const items = (meal.items || []).map(item => item.name).join('; ');
+      const advice = (meal.advice || '').replace(/,/g, ';').replace(/\n/g, ' ');
+      return `${date},${meal.mealType || ''},${meal.dietaryPreference || 'Standard'},${meal.totalCalories || 0},${meal.macros?.protein || 0},${meal.macros?.carbs || 0},${meal.macros?.fats || 0},"${items}","${advice}"`;
+    });
+    
+    const csv = csvHeaders + csvRows.join('\n');
+    
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename=meals-export-${Date.now()}.csv`);
+    res.send(csv);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/meals/weekly-summary', async (req, res) => {
+  try {
+    const { weekStart } = req.query;
+    const startDate = weekStart ? new Date(weekStart) : new Date();
+    startDate.setDate(startDate.getDate() - startDate.getDay());
+    startDate.setHours(0, 0, 0, 0);
+    
+    const endDate = new Date(startDate);
+    endDate.setDate(endDate.getDate() + 6);
+    endDate.setHours(23, 59, 59, 999);
+    
+    const meals = await Meal.find({
+      timestamp: { $gte: startDate, $lte: endDate }
+    }).lean();
+    
+    const summary = {
+      weekStart: startDate.toISOString().split('T')[0],
+      weekEnd: endDate.toISOString().split('T')[0],
+      totalMeals: meals.length,
+      totalCalories: 0,
+      avgDailyCalories: 0,
+      totalProtein: 0,
+      totalCarbs: 0,
+      totalFats: 0,
+      dailyBreakdown: {},
+      mealTypeBreakdown: {},
+      dietaryPreferenceBreakdown: {}
+    };
+    
+    meals.forEach(meal => {
+      summary.totalCalories += meal.totalCalories || 0;
+      summary.totalProtein += meal.macros?.protein || 0;
+      summary.totalCarbs += meal.macros?.carbs || 0;
+      summary.totalFats += meal.macros?.fats || 0;
+      
+      const date = new Date(meal.timestamp).toISOString().split('T')[0];
+      if (!summary.dailyBreakdown[date]) {
+        summary.dailyBreakdown[date] = {
+          calories: 0,
+          protein: 0,
+          carbs: 0,
+          fats: 0,
+          mealCount: 0
+        };
+      }
+      summary.dailyBreakdown[date].calories += meal.totalCalories || 0;
+      summary.dailyBreakdown[date].protein += meal.macros?.protein || 0;
+      summary.dailyBreakdown[date].carbs += meal.macros?.carbs || 0;
+      summary.dailyBreakdown[date].fats += meal.macros?.fats || 0;
+      summary.dailyBreakdown[date].mealCount += 1;
+      
+      const mealType = meal.mealType || 'Other';
+      summary.mealTypeBreakdown[mealType] = (summary.mealTypeBreakdown[mealType] || 0) + 1;
+      
+      const dietPref = meal.dietaryPreference || 'Standard';
+      summary.dietaryPreferenceBreakdown[dietPref] = (summary.dietaryPreferenceBreakdown[dietPref] || 0) + 1;
+    });
+    
+    const daysWithMeals = Object.keys(summary.dailyBreakdown).length;
+    summary.avgDailyCalories = daysWithMeals > 0 ? Math.round(summary.totalCalories / daysWithMeals) : 0;
+    
+    res.json({ summary });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/meals/insights', async (req, res) => {
+  try {
+    const { days = 30 } = req.query;
+    const daysAgo = new Date();
+    daysAgo.setDate(daysAgo.getDate() - parseInt(days));
+    
+    const meals = await Meal.find({
+      timestamp: { $gte: daysAgo }
+    }).sort({ timestamp: -1 }).lean();
+    
+    if (meals.length === 0) {
+      return res.json({ insights: ['Not enough meal data to generate insights. Start logging meals to see insights!'] });
+    }
+    
+    const totalCalories = meals.reduce((sum, m) => sum + (m.totalCalories || 0), 0);
+    const avgCalories = Math.round(totalCalories / meals.length);
+    const totalProtein = meals.reduce((sum, m) => sum + (m.macros?.protein || 0), 0);
+    const avgProtein = Math.round(totalProtein / meals.length);
+    
+    const mealTypes = {};
+    meals.forEach(meal => {
+      const type = meal.mealType || 'Other';
+      mealTypes[type] = (mealTypes[type] || 0) + 1;
+    });
+    
+    const mostCommonMealType = Object.keys(mealTypes).reduce((a, b) => 
+      mealTypes[a] > mealTypes[b] ? a : b
+    );
+    
+    const insights = [];
+    
+    if (avgCalories < 300) {
+      insights.push(`Your average meal contains ${avgCalories} calories, which is quite light. Consider adding more nutrient-dense foods.`);
+    } else if (avgCalories > 800) {
+      insights.push(`Your average meal contains ${avgCalories} calories. Consider portion control for better weight management.`);
+    } else {
+      insights.push(`Your average meal contains ${avgCalories} calories, which is well-balanced.`);
+    }
+    
+    if (avgProtein < 15) {
+      insights.push(`Average protein per meal is ${avgProtein}g. Try including more protein-rich foods like dal, paneer, or legumes.`);
+    } else if (avgProtein > 40) {
+      insights.push(`Great! Your meals average ${avgProtein}g of protein, which is excellent for muscle maintenance.`);
+    }
+    
+    insights.push(`You've logged ${meals.length} meals in the last ${days} days. ${mostCommonMealType} is your most common meal type.`);
+    
+    const recentMeals = meals.slice(0, 7);
+    const recentAvgCal = Math.round(recentMeals.reduce((sum, m) => sum + (m.totalCalories || 0), 0) / recentMeals.length);
+    if (recentAvgCal > avgCalories + 100) {
+      insights.push(`Your recent meals have been higher in calories (${recentAvgCal} avg) compared to your overall average.`);
+    } else if (recentAvgCal < avgCalories - 100) {
+      insights.push(`Your recent meals have been lower in calories (${recentAvgCal} avg) - great for weight management!`);
+    }
+    
+    res.json({ insights });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/favorites', async (req, res) => {
+  try {
+    const favoriteData = {
+      name: req.body.name || 'Untitled Meal',
+      items: req.body.items || [],
+      totalCalories: req.body.totalCalories || 0,
+      macros: {
+        protein: req.body.macros?.protein || req.body.macros_summary?.protein || 0,
+        carbs: req.body.macros?.carbs || req.body.macros_summary?.carbs || 0,
+        fats: req.body.macros?.fats || req.body.macros_summary?.fats || 0
+      },
+      mealType: req.body.mealType || 'Lunch',
+      dietaryPreference: req.body.dietaryPreference || 'Standard',
+      createdAt: new Date()
+    };
+    
+    const favorite = await FavoriteMeal.create(favoriteData);
+    res.json({ success: true, favorite });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/favorites', async (req, res) => {
+  try {
+    const favorites = await FavoriteMeal.find().sort({ createdAt: -1 }).lean();
+    res.json({ favorites });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/favorites/:id', async (req, res) => {
+  try {
+    await FavoriteMeal.findByIdAndDelete(req.params.id);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/meals/quick-add', async (req, res) => {
+  try {
+    const mealData = {
+      imageUrl: '',
+      items: req.body.items || [],
+      totalCalories: req.body.total_calories || req.body.totalCalories || 0,
+      macros: {
+        protein: req.body.macros_summary?.protein || req.body.macros?.protein || 0,
+        carbs: req.body.macros_summary?.carbs || req.body.macros?.carbs || 0,
+        fats: req.body.macros_summary?.fats || req.body.macros?.fats || 0
+      },
+      timestamp: req.body.timestamp ? new Date(req.body.timestamp) : new Date(),
+      mealType: req.body.mealType || getMealType(),
+      dietaryPreference: req.body.dietaryPreference || 'Standard',
+      advice: req.body.advice || 'Manually added meal'
+    };
+    
+    const newMeal = await Meal.create(mealData);
+    res.json({ success: true, meal: newMeal });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+function loadDailyTracker() {
+  const dataDir = path.join(__dirname, 'data');
+  if (!fs.existsSync(dataDir)) {
+    fs.mkdirSync(dataDir, { recursive: true });
+  }
+  const filePath = path.join(dataDir, 'tracker.json');
+  if (fs.existsSync(filePath)) {
+    const data = fs.readFileSync(filePath, 'utf8');
+    return JSON.parse(data);
+  }
+  return {};
+}
+
+function saveDailyTracker(tracker) {
+  const dataDir = path.join(__dirname, 'data');
+  if (!fs.existsSync(dataDir)) {
+    fs.mkdirSync(dataDir, { recursive: true });
+  }
+  const filePath = path.join(dataDir, 'tracker.json');
+  fs.writeFileSync(filePath, JSON.stringify(tracker, null, 2));
+}
 
 
