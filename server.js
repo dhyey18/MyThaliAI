@@ -1326,7 +1326,7 @@ Return ONLY valid JSON:
 // PHASE 2: ADDITIONAL AI FEATURES
 // ==========================================
 
-// AI Recipe Generator - Create recipes from ingredients
+// AI Recipe Generator - Enhanced with Advanced Features
 app.post('/ai/recipe', async (req, res) => {
   try {
     const { 
@@ -1334,7 +1334,17 @@ app.post('/ai/recipe', async (req, res) => {
       dietaryPreference = 'Standard',
       cuisineType = 'Indian',
       mealType = 'Any',
-      maxPrepTime = 60
+      maxPrepTime = 60,
+      // NEW ENHANCED FEATURES
+      skillLevel = 'intermediate', // beginner, intermediate, advanced
+      servings = 2,
+      calorieTarget = null, // null or number
+      optimizeFor = 'balanced', // balanced, protein, lowCarb, lowFat, fiber
+      useLeftovers = false,
+      cookingEquipment = [], // available equipment
+      spiceLevel = 'medium', // mild, medium, spicy, extraSpicy
+      healthGoal = null, // weightLoss, muscleGain, energy, immunity
+      allergies = []
     } = req.body;
 
     if (ingredients.length === 0) {
@@ -1347,10 +1357,33 @@ app.post('/ai/recipe', async (req, res) => {
     } else if (dietaryPreference === 'Vegan') {
       dietContext = 'Vegan diet: NO dairy, eggs, honey.';
     } else if (dietaryPreference === 'Keto') {
-      dietContext = 'Keto diet: Very low carb, high fat.';
+      dietContext = 'Keto diet: Very low carb (<10g net carbs), high fat.';
+    } else if (dietaryPreference === 'High Protein') {
+      dietContext = 'High Protein: Each recipe should have 25g+ protein per serving.';
     }
 
-    const prompt = `You are an expert Indian chef and nutritionist. Create 3 healthy recipes using the given ingredients.
+    let optimizationContext = '';
+    switch (optimizeFor) {
+      case 'protein': optimizationContext = 'Maximize protein content.'; break;
+      case 'lowCarb': optimizationContext = 'Minimize carbohydrates.'; break;
+      case 'lowFat': optimizationContext = 'Minimize fats, focus on lean preparations.'; break;
+      case 'fiber': optimizationContext = 'Maximize fiber content for gut health.'; break;
+      default: optimizationContext = 'Balanced macronutrients.';
+    }
+
+    const allergyContext = allergies.length > 0 
+      ? `ALLERGIES TO AVOID: ${allergies.join(', ')}. Do NOT include any ingredients containing these.`
+      : '';
+
+    const equipmentContext = cookingEquipment.length > 0
+      ? `Available equipment: ${cookingEquipment.join(', ')}. Prefer recipes that use this equipment.`
+      : '';
+
+    const leftoverContext = useLeftovers
+      ? 'User wants to use up leftovers. Suggest creative ways to combine these ingredients.'
+      : '';
+
+    const prompt = `You are an expert Indian chef, nutritionist, and culinary educator. Create 4 healthy, delicious recipes using the given ingredients.
 
 AVAILABLE INGREDIENTS:
 ${ingredients.join(', ')}
@@ -1359,46 +1392,127 @@ REQUIREMENTS:
 - Dietary Preference: ${dietaryPreference} ${dietContext}
 - Cuisine: ${cuisineType}
 - Meal Type: ${mealType}
-- Max Prep Time: ${maxPrepTime} minutes
-- Recipes should be healthy and nutritious
-- Include nutrition estimates per serving
+- Max Prep + Cook Time: ${maxPrepTime} minutes
+- Skill Level: ${skillLevel}
+- Servings: ${servings}
+- Spice Level: ${spiceLevel}
+- Optimization: ${optimizationContext}
+${calorieTarget ? `- Target Calories: ~${calorieTarget} per serving` : ''}
+${healthGoal ? `- Health Goal: ${healthGoal}` : ''}
+${allergyContext}
+${equipmentContext}
+${leftoverContext}
 
-Return ONLY valid JSON:
+Return ONLY valid JSON with comprehensive recipe data:
 {
   "recipes": [
     {
-      "name": "Recipe name",
-      "description": "Brief description",
-      "prepTime": "20 mins",
-      "cookTime": "15 mins",
-      "servings": 2,
+      "name": "Recipe name in English",
+      "hindiName": "Hindi/regional name if applicable",
+      "description": "Appetizing 2-line description",
+      "prepTime": "15 mins",
+      "cookTime": "20 mins",
+      "totalTime": "35 mins",
+      "servings": ${servings},
       "difficulty": "Easy|Medium|Hard",
+      "skillLevel": "${skillLevel}",
+      "spiceLevel": "${spiceLevel}",
       "ingredients": [
-        { "item": "ingredient", "quantity": "1 cup" }
+        { 
+          "item": "ingredient name", 
+          "quantity": "1 cup",
+          "preparation": "chopped/sliced/etc",
+          "optional": false,
+          "substitute": "alternative ingredient"
+        }
       ],
-      "instructions": ["Step 1", "Step 2"],
+      "instructions": [
+        {
+          "step": 1,
+          "instruction": "Detailed step description",
+          "time": "5 mins",
+          "tip": "Pro tip for this step"
+        }
+      ],
       "nutrition": {
         "calories": 350,
         "protein": 15,
         "carbs": 40,
-        "fats": 12
+        "fats": 12,
+        "fiber": 5,
+        "sugar": 3,
+        "sodium": 400
       },
-      "tips": "Chef tip for this recipe"
+      "healthBenefits": ["benefit 1", "benefit 2"],
+      "allergens": ["dairy", "gluten"],
+      "tags": ["high-protein", "quick", "meal-prep-friendly"],
+      "rating": {
+        "taste": 5,
+        "healthiness": 4,
+        "ease": 3
+      },
+      "mealPrepTips": "How to prep ahead or store",
+      "servingSuggestions": "Pair with X for complete meal",
+      "variations": [
+        {
+          "name": "Variation name",
+          "change": "What to change",
+          "benefit": "Why this variation"
+        }
+      ],
+      "tips": "Chef's secret tip",
+      "videoKeywords": "YouTube search terms for tutorial"
     }
-  ]
+  ],
+  "ingredientUsage": {
+    "fullyUsed": ["ingredient 1"],
+    "partiallyUsed": [{"ingredient": "name", "remaining": "quantity left"}],
+    "notUsed": ["ingredient that wasn't needed"]
+  },
+  "shoppingListForMissing": [
+    {
+      "item": "missing ingredient",
+      "quantity": "needed amount",
+      "estimatedCost": 30,
+      "whereToFind": "local store/supermarket"
+    }
+  ],
+  "nutritionComparison": {
+    "bestForProtein": "Recipe name",
+    "lowestCalories": "Recipe name",
+    "mostBalanced": "Recipe name"
+  },
+  "mealPlanSuggestion": "How to use these recipes across the week",
+  "aiChefNote": "Personalized note about these recipes"
 }`;
 
-    const text = await callGeminiWithRetry(prompt, { temperature: 0.8, maxOutputTokens: 3000 });
+    const text = await callGeminiWithRetry(prompt, { temperature: 0.8, maxOutputTokens: 5000 });
     const cleanText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
     const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
     
     if (!jsonMatch) throw new Error('Invalid AI response');
-    const data = JSON.parse(jsonMatch[0]);
+    
+    let data;
+    try {
+      data = JSON.parse(jsonMatch[0]);
+    } catch (parseError) {
+      console.error('JSON parse error:', parseError.message);
+      throw new Error('Invalid AI response format');
+    }
 
     res.json({
       success: true,
       ...data,
-      parameters: { ingredients, dietaryPreference, cuisineType, mealType },
+      parameters: { 
+        ingredients, 
+        dietaryPreference, 
+        cuisineType, 
+        mealType,
+        skillLevel,
+        servings,
+        optimizeFor,
+        spiceLevel
+      },
       timestamp: new Date().toISOString()
     });
   } catch (error) {
@@ -1406,6 +1520,7 @@ Return ONLY valid JSON:
     res.status(500).json({ error: 'Failed to generate recipes. Please try again.', details: error.message });
   }
 });
+
 
 // Text-to-Calories - Estimate calories from text description
 app.post('/ai/text-to-calories', async (req, res) => {
@@ -1629,12 +1744,24 @@ app.post('/ai/grocery-list', async (req, res) => {
       mealsPerDay = 3,
       dietaryPreference = 'Standard',
       budget = 'medium', // low, medium, high
-      familySize = 2
+      familySize = 2,
+      mealPlan = null, // optional: provide specific meal plan
+      pantryItems = [], // items user already has
+      shoppingLocation = 'local', // local, supermarket, online
+      prioritizeOrganic = false,
+      includeSnacks = true
     } = req.body;
 
     // Get favorite meals for personalization
     const favoriteMeals = await FavoriteMeal.find().limit(5).lean();
     const favoriteItems = favoriteMeals.flatMap(m => m.items?.map(i => i.name) || []);
+
+    // Get recent meals for pattern analysis
+    const recentMeals = await Meal.find()
+      .sort({ timestamp: -1 })
+      .limit(10)
+      .lean();
+    const frequentlyUsedItems = recentMeals.flatMap(m => m.items?.map(i => i.name) || []);
 
     let dietContext = '';
     if (dietaryPreference === 'Jain') {
@@ -1643,7 +1770,15 @@ app.post('/ai/grocery-list', async (req, res) => {
       dietContext = 'EXCLUDE: all dairy, eggs, honey';
     }
 
-    const prompt = `You are an Indian home cook expert. Create a smart grocery shopping list.
+    const pantryContext = pantryItems.length > 0 
+      ? `USER ALREADY HAS: ${pantryItems.join(', ')}. Do NOT include these items unless quantity is insufficient.`
+      : 'User has not specified pantry items. Include everything needed.';
+
+    const mealPlanContext = mealPlan 
+      ? `SPECIFIC MEAL PLAN PROVIDED: ${JSON.stringify(mealPlan).substring(0, 500)}`
+      : 'Generate meal plan based on preferences.';
+
+    const prompt = `You are an expert Indian home cook and smart shopping advisor. Create an intelligent grocery shopping list.
 
 REQUIREMENTS:
 - Days to plan for: ${days}
@@ -1651,15 +1786,33 @@ REQUIREMENTS:
 - Family size: ${familySize}
 - Dietary Preference: ${dietaryPreference} ${dietContext}
 - Budget: ${budget}
+- Shopping Location: ${shoppingLocation}
+- Prioritize Organic: ${prioritizeOrganic}
+- Include Snacks: ${includeSnacks}
 - User's favorite items: ${favoriteItems.join(', ') || 'Not available'}
+- Frequently used items: ${frequentlyUsedItems.slice(0, 10).join(', ') || 'Not available'}
+${pantryContext}
+${mealPlanContext}
 
-Create a comprehensive Indian grocery list organized by category.
+Create a comprehensive, smart Indian grocery list with enhanced features.
 
 Return ONLY valid JSON:
 {
   "groceryList": {
     "vegetables": [
-      { "item": "Tomatoes", "quantity": "1 kg", "estimatedCost": 40 }
+      { 
+        "item": "Tomatoes", 
+        "quantity": "1 kg", 
+        "estimatedCost": 40,
+        "priority": "high|medium|low",
+        "shelfLife": "3-5 days",
+        "seasonal": true/false,
+        "organicAvailable": true/false,
+        "bulkBuy": true/false,
+        "storeSection": "fresh produce",
+        "alternatives": ["alternative 1", "alternative 2"],
+        "nutritionalValue": "Rich in vitamin C"
+      }
     ],
     "fruits": [],
     "dairy": [],
@@ -1667,25 +1820,139 @@ Return ONLY valid JSON:
     "pulses": [],
     "spices": [],
     "oils": [],
+    "snacks": [],
+    "beverages": [],
     "others": []
   },
-  "estimatedTotalCost": number,
-  "mealSuggestions": ["Meal 1", "Meal 2", "Meal 3"],
-  "shoppingTips": ["Tip 1", "Tip 2"],
-  "storageAdvice": "How to store items for the week"
+  "estimatedTotalCost": {
+    "total": number,
+    "byCategory": {
+      "vegetables": number,
+      "fruits": number
+    },
+    "budgetComparison": "within|over|under",
+    "savingsTips": ["tip 1", "tip 2"]
+  },
+  "shoppingRoute": {
+    "storeLayout": [
+      {
+        "section": "Fresh Produce",
+        "items": ["item 1", "item 2"],
+        "estimatedTime": "5 mins"
+      }
+    ],
+    "optimizedOrder": ["section 1", "section 2"],
+    "totalShoppingTime": "X minutes"
+  },
+  "mealSuggestions": [
+    {
+      "meal": "Meal name",
+      "day": "Monday",
+      "ingredients": ["ingredient 1", "ingredient 2"],
+      "prepTime": "15 mins"
+    }
+  ],
+  "bulkBuyRecommendations": [
+    {
+      "item": "Rice",
+      "currentQuantity": "1 kg",
+      "recommendedQuantity": "5 kg",
+      "savings": "₹50",
+      "reason": "Used frequently, better value"
+    }
+  ],
+  "priceComparison": {
+    "bestValueItems": [
+      {
+        "item": "Item name",
+        "recommendedStore": "Store name",
+        "priceDifference": "₹X cheaper"
+      }
+    ],
+    "onlineVsOffline": "Online might save ₹X on these items"
+  },
+  "seasonalAvailability": {
+    "inSeason": ["item 1", "item 2"],
+    "outOfSeason": ["item 1"],
+    "seasonalAlternatives": {
+      "outOfSeasonItem": "better alternative"
+    }
+  },
+  "storageAdvice": {
+    "refrigerator": ["item 1", "item 2"],
+    "pantry": ["item 1", "item 2"],
+    "freezer": ["item 1"],
+    "tips": ["storage tip 1", "tip 2"],
+    "expirationTracking": {
+      "useFirst": ["item 1", "item 2"],
+      "lastsLongest": ["item 1"]
+    }
+  },
+  "nutritionSummary": {
+    "totalCalories": number,
+    "macros": {
+      "protein": "X grams",
+      "carbs": "X grams",
+      "fats": "X grams"
+    },
+    "keyNutrients": ["Vitamin C", "Iron"],
+    "healthScore": "A|B|C"
+  },
+  "mealPrepSuggestions": [
+    {
+      "prepItem": "Chopped vegetables",
+      "benefit": "Saves 10 mins daily",
+      "storage": "Refrigerator, 3 days"
+    }
+  ],
+  "shoppingTips": [
+    "Tip 1: Buy vegetables in the morning for freshness",
+    "Tip 2: Check expiry dates on dairy products"
+  ],
+  "alternativeStores": [
+    {
+      "storeName": "Store name",
+      "bestFor": "Fresh produce",
+      "estimatedSavings": "₹X"
+    }
+  ],
+  "emergencySubstitutes": {
+    "ifUnavailable": {
+      "item": "Substitute item",
+      "reason": "Why it works"
+    }
+  }
 }`;
 
-    const text = await callGeminiWithRetry(prompt, { temperature: 0.7, maxOutputTokens: 3000 });
+    const text = await callGeminiWithRetry(prompt, { temperature: 0.7, maxOutputTokens: 4000 });
     const cleanText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
     const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
     
     if (!jsonMatch) throw new Error('Invalid AI response');
-    const data = JSON.parse(jsonMatch[0]);
+    
+    let data;
+    try {
+      data = JSON.parse(jsonMatch[0]);
+    } catch (parseError) {
+      console.error('JSON parse error:', parseError.message);
+      console.error('Response text:', cleanText.substring(0, 500));
+      throw new Error('Invalid AI response format: ' + parseError.message);
+    }
 
     res.json({
       success: true,
       ...data,
-      parameters: { days, mealsPerDay, familySize, dietaryPreference, budget },
+      parameters: { 
+        days, 
+        mealsPerDay, 
+        familySize, 
+        dietaryPreference, 
+        budget,
+        shoppingLocation,
+        prioritizeOrganic,
+        includeSnacks,
+        pantryItemsCount: pantryItems.length
+      },
       timestamp: new Date().toISOString()
     });
   } catch (error) {
