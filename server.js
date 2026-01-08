@@ -769,7 +769,7 @@ function saveDailyTracker(tracker) {
 // GEMINI AI HELPER WITH RETRY LOGIC
 // ==========================================
 
-const AI_MODELS = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro', 'gemini-2.0-flash'];
+const AI_MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite','gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro', 'gemini-2.0-flash'];
 
 async function callGeminiWithRetry(prompt, config = {}) {
   const { temperature = 0.7, maxOutputTokens = 1000, retries = 2 } = config;
