@@ -956,12 +956,41 @@ Return ONLY valid JSON (no markdown):
     let text = await callGeminiWithRetry(prompt, { temperature: 0.8, maxOutputTokens: 1500 });
     text = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
 
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    let jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
-      throw new Error('Invalid AI response format');
+      console.error('No JSON found in response:', text.substring(0, 500));
+      throw new Error('Invalid AI response format: No JSON found');
     }
 
-    const data = JSON.parse(jsonMatch[0]);
+    let data;
+    try {
+      data = JSON.parse(jsonMatch[0]);
+    } catch (parseError) {
+      console.error('JSON parse error:', parseError.message);
+      console.error('Response text:', text.substring(0, 500));
+      
+      const jsonStart = text.indexOf('{');
+      if (jsonStart !== -1) {
+        const jsonText = text.substring(jsonStart);
+        const lastBrace = jsonText.lastIndexOf('}');
+        if (lastBrace !== -1) {
+          try {
+            data = JSON.parse(jsonText.substring(0, lastBrace + 1));
+          } catch (e) {
+            throw new Error('Invalid AI response format: ' + parseError.message);
+          }
+        } else {
+          throw new Error('Invalid AI response format: ' + parseError.message);
+        }
+      } else {
+        throw new Error('Invalid AI response format: ' + parseError.message);
+      }
+    }
+
+    if (!data.suggestions || !Array.isArray(data.suggestions)) {
+      console.error('Invalid suggestions format:', data);
+      throw new Error('Invalid AI response format: Missing suggestions array');
+    }
 
     res.json({
       success: true,
