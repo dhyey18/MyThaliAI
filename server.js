@@ -442,6 +442,15 @@ app.delete('/meals/:id', async (req, res) => {
   }
 });
 
+app.delete('/meals', async (req, res) => {
+  try {
+    const result = await Meal.deleteMany({});
+    res.json({ success: true, deletedCount: result.deletedCount });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/meals/stats', async (req, res) => {
   try {
     const { days = 7 } = req.query;
@@ -764,5 +773,896 @@ function saveDailyTracker(tracker) {
   const filePath = path.join(dataDir, 'tracker.json');
   fs.writeFileSync(filePath, JSON.stringify(tracker, null, 2));
 }
+
+// ==========================================
+// GEMINI AI HELPER WITH RETRY LOGIC
+// ==========================================
+
+const AI_MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite','gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro', 'gemini-2.0-flash'];
+
+async function callGeminiWithRetry(prompt, config = {}) {
+  const { temperature = 0.7, maxOutputTokens = 1000, retries = 2 } = config;
+  let lastError = null;
+
+  for (const modelName of AI_MODELS) {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        if (attempt > 0) {
+          // Wait before retry (exponential backoff)
+          await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
+        }
+        
+        const model = genAI.getGenerativeModel({
+          model: modelName,
+          generationConfig: { temperature, maxOutputTokens, topP: 0.9 }
+        });
+        
+        const result = await model.generateContent(prompt);
+        const response = await result.response;
+        return response.text();
+      } catch (error) {
+        lastError = error;
+        console.log(`Model ${modelName} attempt ${attempt + 1} failed:`, error.message?.substring(0, 100));
+        
+        // If rate limited or service unavailable, try next model immediately
+        if (error.status === 429 || error.status === 503) {
+          break; // Try next model
+        }
+      }
+    }
+  }
+
+  throw lastError || new Error('All AI models failed');
+}
+
+// ==========================================
+// NEW AI-POWERED ENDPOINTS
+// ==========================================
+
+// AI Chat - Nutrition Q&A Assistant
+app.post('/ai/chat', async (req, res) => {
+  try {
+    const { message, conversationHistory = [] } = req.body;
+    
+    if (!message) {
+      return res.status(400).json({ error: 'Message is required' });
+    }
+
+    // Get recent meals for context
+    const recentMeals = await Meal.find()
+      .sort({ timestamp: -1 })
+      .limit(5)
+      .lean();
+
+    const mealContext = recentMeals.length > 0 
+      ? `User's recent meals: ${recentMeals.map(m => m.items?.map(i => i.name).join(', ')).join('; ')}`
+      : 'No recent meal data available';
+
+    const systemPrompt = `You are a friendly, knowledgeable Indian nutrition expert assistant named "Thali AI". You help users with nutrition questions, focusing on Indian cuisine and traditional foods.
+
+CONTEXT:
+${mealContext}
+
+GUIDELINES:
+1. Give concise, practical advice (2-3 sentences max for simple questions)
+2. Focus on Indian foods and cooking methods
+3. Include specific food examples from Indian cuisine (dal, roti, sabzi, etc.)
+4. Be encouraging and supportive
+5. If asked about non-nutrition topics, politely redirect to nutrition
+6. Use emojis sparingly to be friendly 🍛
+
+Previous conversation:
+${conversationHistory.map(m => `${m.role}: ${m.content}`).join('\n')}
+
+User question: ${message}
+
+Respond naturally as a helpful nutrition assistant:`;
+
+    const aiMessage = await callGeminiWithRetry(systemPrompt, { temperature: 0.7, maxOutputTokens: 500 });
+
+    res.json({
+      success: true,
+      message: aiMessage,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('AI Chat error:', error);
+    res.status(500).json({ error: 'Failed to get AI response. API rate limit may be reached. Please try again in a few seconds.', details: error.message });
+  }
+});
+
+// AI Meal Suggestions - Smart recommendations based on history
+app.get('/ai/suggestions', async (req, res) => {
+  try {
+    const { dietaryPreference = 'Standard' } = req.query;
+
+    // Get recent meals and goals
+    const recentMeals = await Meal.find()
+      .sort({ timestamp: -1 })
+      .limit(10)
+      .lean();
+
+    const tracker = loadDailyTracker();
+    const today = new Date().toDateString();
+    const goals = tracker[today]?.goals || { calories: 2000, protein: 150, carbs: 250, fats: 65 };
+
+    // Calculate today's consumption
+    const todayMeals = recentMeals.filter(m => 
+      new Date(m.timestamp).toDateString() === today
+    );
+    
+    const consumed = todayMeals.reduce((acc, meal) => ({
+      calories: acc.calories + (meal.totalCalories || 0),
+      protein: acc.protein + (meal.macros?.protein || 0),
+      carbs: acc.carbs + (meal.macros?.carbs || 0),
+      fats: acc.fats + (meal.macros?.fats || 0)
+    }), { calories: 0, protein: 0, carbs: 0, fats: 0 });
+
+    const remaining = {
+      calories: Math.max(0, goals.calories - consumed.calories),
+      protein: Math.max(0, goals.protein - consumed.protein),
+      carbs: Math.max(0, goals.carbs - consumed.carbs),
+      fats: Math.max(0, goals.fats - consumed.fats)
+    };
+
+    const recentFoods = recentMeals.flatMap(m => m.items?.map(i => i.name) || []).slice(0, 15);
+    const mealType = getMealType();
+
+    let dietContext = '';
+    if (dietaryPreference === 'Jain') {
+      dietContext = 'MUST follow Jain diet: NO onion, garlic, root vegetables (potato, carrot, radish, beetroot), non-veg.';
+    } else if (dietaryPreference === 'Vegan') {
+      dietContext = 'MUST be Vegan: NO dairy (milk, ghee, paneer, yogurt, butter), eggs, honey.';
+    } else if (dietaryPreference === 'Keto') {
+      dietContext = 'MUST be Keto-friendly: Very low carb (<10g per meal), high fat, moderate protein.';
+    } else if (dietaryPreference === 'High Protein') {
+      dietContext = 'MUST be high protein: At least 25-30g protein per meal suggestion.';
+    }
+
+    const prompt = `You are an Indian nutrition expert. Suggest 4 meal options for ${mealType}.
+
+USER CONTEXT:
+- Dietary Preference: ${dietaryPreference}
+- ${dietContext}
+- Remaining goals today: ${remaining.calories} cal, ${remaining.protein}g protein, ${remaining.carbs}g carbs, ${remaining.fats}g fats
+- Recently eaten: ${recentFoods.join(', ') || 'No recent data'}
+
+REQUIREMENTS:
+1. Suggest 4 different Indian meal options
+2. Include variety (different from recent meals)
+3. Each meal should help meet remaining nutritional goals
+4. Include specific portions
+
+Return ONLY valid JSON (no markdown):
+{
+  "suggestions": [
+    {
+      "name": "Meal name (e.g., 'Paneer Bhurji with 2 Rotis')",
+      "description": "Brief 1-line description",
+      "calories": number,
+      "protein": number,
+      "carbs": number,
+      "fats": number,
+      "reason": "Why this meal is suggested (1 line)"
+    }
+  ]
+}`;
+
+    const model = genAI.getGenerativeModel({ 
+      model: 'gemini-2.0-flash',
+      generationConfig: { temperature: 0.8, topP: 0.9 }
+    });
+
+    let text = await callGeminiWithRetry(prompt, { temperature: 0.8, maxOutputTokens: 1500 });
+    text = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      throw new Error('Invalid AI response format');
+    }
+
+    const data = JSON.parse(jsonMatch[0]);
+
+    res.json({
+      success: true,
+      suggestions: data.suggestions || [],
+      context: {
+        mealType,
+        dietaryPreference,
+        remaining
+      },
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('AI Suggestions error:', error);
+    res.status(500).json({ error: 'Failed to get suggestions. API rate limit may be reached.', details: error.message });
+  }
+});
+
+// AI Health Score - Personalized health scoring
+app.get('/ai/health-score', async (req, res) => {
+  try {
+    const { days = 7 } = req.query;
+    const daysAgo = new Date();
+    daysAgo.setDate(daysAgo.getDate() - parseInt(days));
+
+    const meals = await Meal.find({
+      timestamp: { $gte: daysAgo }
+    }).lean();
+
+    if (meals.length < 3) {
+      return res.json({
+        success: true,
+        score: null,
+        message: 'Need at least 3 meals to calculate health score. Keep logging!',
+        mealsLogged: meals.length,
+        mealsNeeded: 3
+      });
+    }
+
+    // Calculate basic stats
+    const totalCalories = meals.reduce((sum, m) => sum + (m.totalCalories || 0), 0);
+    const avgCalories = Math.round(totalCalories / meals.length);
+    const totalProtein = meals.reduce((sum, m) => sum + (m.macros?.protein || 0), 0);
+    const avgProtein = Math.round(totalProtein / meals.length);
+    const totalCarbs = meals.reduce((sum, m) => sum + (m.macros?.carbs || 0), 0);
+    const totalFats = meals.reduce((sum, m) => sum + (m.macros?.fats || 0), 0);
+
+    // Get unique food items for variety score
+    const allFoods = meals.flatMap(m => m.items?.map(i => i.name.toLowerCase()) || []);
+    const uniqueFoods = [...new Set(allFoods)];
+
+    // Meal types distribution
+    const mealTypes = {};
+    meals.forEach(m => {
+      const type = m.mealType || 'Other';
+      mealTypes[type] = (mealTypes[type] || 0) + 1;
+    });
+
+    const prompt = `You are a nutrition health analyst. Calculate a health score (0-100) based on this data:
+
+MEAL DATA (Last ${days} days):
+- Total meals: ${meals.length}
+- Average calories per meal: ${avgCalories}
+- Average protein per meal: ${avgProtein}g
+- Total protein: ${totalProtein}g, Carbs: ${totalCarbs}g, Fats: ${totalFats}g
+- Unique foods eaten: ${uniqueFoods.length} (${uniqueFoods.slice(0, 10).join(', ')})
+- Meal type distribution: ${JSON.stringify(mealTypes)}
+
+SCORING CRITERIA:
+1. Balance (0-35): Are macros well-balanced? (Ideal: 25-30% protein, 45-55% carbs, 20-30% fats)
+2. Variety (0-35): How diverse are the food choices? (More unique foods = better)
+3. Consistency (0-30): Regular meal patterns and appropriate portions?
+
+Return ONLY valid JSON:
+{
+  "overallScore": number (0-100),
+  "breakdown": {
+    "balance": { "score": number (0-35), "feedback": "1 line feedback" },
+    "variety": { "score": number (0-35), "feedback": "1 line feedback" },
+    "consistency": { "score": number (0-30), "feedback": "1 line feedback" }
+  },
+  "topTip": "Most important improvement suggestion (1-2 lines)",
+  "strengths": ["strength 1", "strength 2"],
+  "improvements": ["improvement 1", "improvement 2"]
+}`;
+
+    const model = genAI.getGenerativeModel({ 
+      model: 'gemini-2.0-flash',
+      generationConfig: { temperature: 0.3 }
+    });
+
+    let text = await callGeminiWithRetry(prompt, { temperature: 0.3, maxOutputTokens: 1500 });
+    text = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      throw new Error('Invalid AI response format');
+    }
+
+    const scoreData = JSON.parse(jsonMatch[0]);
+
+    res.json({
+      success: true,
+      ...scoreData,
+      stats: {
+        mealsAnalyzed: meals.length,
+        daysAnalyzed: parseInt(days),
+        avgCalories,
+        avgProtein,
+        uniqueFoodsCount: uniqueFoods.length
+      },
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('AI Health Score error:', error);
+    res.status(500).json({ error: 'Failed to calculate health score. API rate limit may be reached.', details: error.message });
+  }
+});
+
+// AI Insights - Deep pattern analysis (Enhanced version)
+app.get('/ai/insights', async (req, res) => {
+  try {
+    const { days = 30 } = req.query;
+    const daysAgo = new Date();
+    daysAgo.setDate(daysAgo.getDate() - parseInt(days));
+
+    const meals = await Meal.find({
+      timestamp: { $gte: daysAgo }
+    }).sort({ timestamp: -1 }).lean();
+
+    if (meals.length < 5) {
+      return res.json({
+        success: true,
+        insights: [{
+          type: 'info',
+          title: 'Keep Logging!',
+          content: `You've logged ${meals.length} meals. Log at least 5 meals to unlock AI-powered insights!`
+        }],
+        mealsAnalyzed: meals.length
+      });
+    }
+
+    // Prepare comprehensive data for AI
+    const dailyData = {};
+    meals.forEach(meal => {
+      const date = new Date(meal.timestamp).toDateString();
+      if (!dailyData[date]) {
+        dailyData[date] = { calories: 0, protein: 0, carbs: 0, fats: 0, mealCount: 0, mealTypes: [] };
+      }
+      dailyData[date].calories += meal.totalCalories || 0;
+      dailyData[date].protein += meal.macros?.protein || 0;
+      dailyData[date].carbs += meal.macros?.carbs || 0;
+      dailyData[date].fats += meal.macros?.fats || 0;
+      dailyData[date].mealCount += 1;
+      dailyData[date].mealTypes.push(meal.mealType || 'Other');
+    });
+
+    const allFoods = meals.flatMap(m => m.items?.map(i => i.name) || []);
+    const foodFrequency = {};
+    allFoods.forEach(food => {
+      foodFrequency[food] = (foodFrequency[food] || 0) + 1;
+    });
+    const topFoods = Object.entries(foodFrequency)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([name, count]) => `${name} (${count}x)`);
+
+    const dietaryPrefs = {};
+    meals.forEach(m => {
+      const pref = m.dietaryPreference || 'Standard';
+      dietaryPrefs[pref] = (dietaryPrefs[pref] || 0) + 1;
+    });
+
+    const prompt = `You are an expert nutritionist analyzing eating patterns. Provide 5 personalized, actionable insights.
+
+DATA SUMMARY (Last ${days} days):
+- Total meals: ${meals.length}
+- Days with data: ${Object.keys(dailyData).length}
+- Daily patterns: ${JSON.stringify(Object.values(dailyData).slice(0, 7))}
+- Most eaten foods: ${topFoods.join(', ')}
+- Dietary preferences used: ${JSON.stringify(dietaryPrefs)}
+
+INSIGHT REQUIREMENTS:
+1. Be specific to THIS user's data
+2. Each insight should be actionable
+3. Mix positive observations with improvements
+4. Focus on Indian food context
+5. Include specific food suggestions
+
+Return ONLY valid JSON:
+{
+  "insights": [
+    {
+      "type": "positive|warning|tip|pattern|goal",
+      "emoji": "appropriate emoji",
+      "title": "Short title (3-5 words)",
+      "content": "Detailed insight (2-3 sentences max)",
+      "action": "Specific action to take (optional)"
+    }
+  ],
+  "summary": "One-line overall assessment"
+}`;
+
+    const model = genAI.getGenerativeModel({ 
+      model: 'gemini-2.0-flash',
+      generationConfig: { temperature: 0.7 }
+    });
+
+    let text = await callGeminiWithRetry(prompt, { temperature: 0.7, maxOutputTokens: 2000 });
+    text = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      throw new Error('Invalid AI response format');
+    }
+
+    const insightsData = JSON.parse(jsonMatch[0]);
+
+    res.json({
+      success: true,
+      ...insightsData,
+      mealsAnalyzed: meals.length,
+      daysAnalyzed: parseInt(days),
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('AI Insights error:', error);
+    res.status(500).json({ error: 'Failed to generate insights. API rate limit may be reached.', details: error.message });
+  }
+});
+
+// AI Meal Planner - Weekly meal plan generation
+app.post('/ai/meal-plan', async (req, res) => {
+  try {
+    const { 
+      dietaryPreference = 'Standard', 
+      calorieGoal = 2000,
+      days = 7,
+      mealsPerDay = 3,
+      excludeFoods = []
+    } = req.body;
+
+    let dietContext = '';
+    if (dietaryPreference === 'Jain') {
+      dietContext = 'Jain diet: NO onion, garlic, root vegetables (potato, carrot, radish, beetroot, turnip), non-veg items.';
+    } else if (dietaryPreference === 'Vegan') {
+      dietContext = 'Vegan diet: NO dairy (milk, ghee, paneer, yogurt, butter, cheese), eggs, honey.';
+    } else if (dietaryPreference === 'Keto') {
+      dietContext = 'Keto diet: Very low carb (<50g/day), high fat, moderate protein. Focus on paneer, eggs, low-carb vegetables.';
+    } else if (dietaryPreference === 'High Protein') {
+      dietContext = 'High Protein diet: Target 150g+ protein daily. Include protein in every meal.';
+    }
+
+    const caloriesPerMeal = Math.round(calorieGoal / mealsPerDay);
+
+    const prompt = `You are an Indian meal planning expert. Create a ${days}-day meal plan.
+
+REQUIREMENTS:
+- Dietary Preference: ${dietaryPreference}
+- ${dietContext}
+- Daily Calorie Target: ${calorieGoal} kcal
+- Meals per day: ${mealsPerDay} (${caloriesPerMeal} kcal each approx)
+- Foods to exclude: ${excludeFoods.length > 0 ? excludeFoods.join(', ') : 'None'}
+
+GUIDELINES:
+1. Use authentic Indian recipes and ingredients
+2. Ensure variety - don't repeat same meal within 3 days
+3. Balance macros throughout the day
+4. Include practical, easy-to-cook meals
+5. Consider meal prep efficiency
+
+Return ONLY valid JSON:
+{
+  "mealPlan": [
+    {
+      "day": 1,
+      "dayName": "Monday",
+      "meals": [
+        {
+          "type": "Breakfast|Lunch|Dinner|Snack",
+          "name": "Meal name",
+          "items": ["item1", "item2"],
+          "calories": number,
+          "protein": number,
+          "carbs": number,
+          "fats": number,
+          "prepTime": "15 mins"
+        }
+      ],
+      "dailyTotals": { "calories": number, "protein": number, "carbs": number, "fats": number }
+    }
+  ],
+  "weeklyOverview": {
+    "avgDailyCalories": number,
+    "avgDailyProtein": number,
+    "shoppingListCategories": ["Vegetables", "Dairy", "Grains", "Spices"]
+  },
+  "tips": ["meal prep tip 1", "tip 2"]
+}`;
+
+    const model = genAI.getGenerativeModel({ 
+      model: 'gemini-2.0-flash',
+      generationConfig: { temperature: 0.8, maxOutputTokens: 4000 }
+    });
+
+    let text = await callGeminiWithRetry(prompt, { temperature: 0.8, maxOutputTokens: 4000 });
+    text = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      throw new Error('Invalid AI response format');
+    }
+
+    const planData = JSON.parse(jsonMatch[0]);
+
+    res.json({
+      success: true,
+      ...planData,
+      parameters: {
+        dietaryPreference,
+        calorieGoal,
+        days,
+        mealsPerDay
+      },
+      generatedAt: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('AI Meal Plan error:', error);
+    res.status(500).json({ error: 'Failed to generate meal plan. API rate limit may be reached.', details: error.message });
+  }
+});
+
+// ==========================================
+// PHASE 2: ADDITIONAL AI FEATURES
+// ==========================================
+
+// AI Recipe Generator - Create recipes from ingredients
+app.post('/ai/recipe', async (req, res) => {
+  try {
+    const { 
+      ingredients = [], 
+      dietaryPreference = 'Standard',
+      cuisineType = 'Indian',
+      mealType = 'Any',
+      maxPrepTime = 60
+    } = req.body;
+
+    if (ingredients.length === 0) {
+      return res.status(400).json({ error: 'Please provide at least one ingredient' });
+    }
+
+    let dietContext = '';
+    if (dietaryPreference === 'Jain') {
+      dietContext = 'Jain diet: NO onion, garlic, root vegetables, non-veg.';
+    } else if (dietaryPreference === 'Vegan') {
+      dietContext = 'Vegan diet: NO dairy, eggs, honey.';
+    } else if (dietaryPreference === 'Keto') {
+      dietContext = 'Keto diet: Very low carb, high fat.';
+    }
+
+    const prompt = `You are an expert Indian chef and nutritionist. Create 3 healthy recipes using the given ingredients.
+
+AVAILABLE INGREDIENTS:
+${ingredients.join(', ')}
+
+REQUIREMENTS:
+- Dietary Preference: ${dietaryPreference} ${dietContext}
+- Cuisine: ${cuisineType}
+- Meal Type: ${mealType}
+- Max Prep Time: ${maxPrepTime} minutes
+- Recipes should be healthy and nutritious
+- Include nutrition estimates per serving
+
+Return ONLY valid JSON:
+{
+  "recipes": [
+    {
+      "name": "Recipe name",
+      "description": "Brief description",
+      "prepTime": "20 mins",
+      "cookTime": "15 mins",
+      "servings": 2,
+      "difficulty": "Easy|Medium|Hard",
+      "ingredients": [
+        { "item": "ingredient", "quantity": "1 cup" }
+      ],
+      "instructions": ["Step 1", "Step 2"],
+      "nutrition": {
+        "calories": 350,
+        "protein": 15,
+        "carbs": 40,
+        "fats": 12
+      },
+      "tips": "Chef tip for this recipe"
+    }
+  ]
+}`;
+
+    const text = await callGeminiWithRetry(prompt, { temperature: 0.8, maxOutputTokens: 3000 });
+    const cleanText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
+    
+    if (!jsonMatch) throw new Error('Invalid AI response');
+    const data = JSON.parse(jsonMatch[0]);
+
+    res.json({
+      success: true,
+      ...data,
+      parameters: { ingredients, dietaryPreference, cuisineType, mealType },
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('AI Recipe error:', error);
+    res.status(500).json({ error: 'Failed to generate recipes. Please try again.', details: error.message });
+  }
+});
+
+// Text-to-Calories - Estimate calories from text description
+app.post('/ai/text-to-calories', async (req, res) => {
+  try {
+    const { mealDescription } = req.body;
+
+    if (!mealDescription || mealDescription.trim().length < 3) {
+      return res.status(400).json({ error: 'Please provide a meal description' });
+    }
+
+    const prompt = `You are an expert nutritionist. Analyze this meal description and estimate its nutritional content.
+
+MEAL DESCRIPTION:
+"${mealDescription}"
+
+REQUIREMENTS:
+1. Identify all food items mentioned
+2. Estimate portion sizes based on context
+3. Calculate accurate nutrition values
+4. Assume Indian food context if not specified
+5. Be realistic with portions
+
+Return ONLY valid JSON:
+{
+  "interpretation": "How you interpreted the meal",
+  "items": [
+    {
+      "name": "Food item",
+      "estimatedPortion": "1 bowl (150g)",
+      "calories": 250,
+      "protein": 10,
+      "carbs": 35,
+      "fats": 8
+    }
+  ],
+  "totals": {
+    "calories": number,
+    "protein": number,
+    "carbs": number,
+    "fats": number
+  },
+  "confidence": "high|medium|low",
+  "notes": "Any assumptions made"
+}`;
+
+    const text = await callGeminiWithRetry(prompt, { temperature: 0.3, maxOutputTokens: 1500 });
+    const cleanText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
+    
+    if (!jsonMatch) throw new Error('Invalid AI response');
+    const data = JSON.parse(jsonMatch[0]);
+
+    res.json({
+      success: true,
+      ...data,
+      originalDescription: mealDescription,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Text-to-Calories error:', error);
+    res.status(500).json({ error: 'Failed to analyze meal description.', details: error.message });
+  }
+});
+
+// Food Comparison - Compare two foods nutritionally
+app.post('/ai/compare-foods', async (req, res) => {
+  try {
+    const { food1, food2, portion1 = '100g', portion2 = '100g' } = req.body;
+
+    if (!food1 || !food2) {
+      return res.status(400).json({ error: 'Please provide two foods to compare' });
+    }
+
+    const prompt = `You are a nutrition expert. Compare these two foods in detail.
+
+COMPARISON:
+Food 1: ${food1} (${portion1})
+Food 2: ${food2} (${portion2})
+
+Provide a detailed nutritional comparison with Indian food context.
+
+Return ONLY valid JSON:
+{
+  "food1": {
+    "name": "${food1}",
+    "portion": "${portion1}",
+    "calories": number,
+    "protein": number,
+    "carbs": number,
+    "fats": number,
+    "fiber": number,
+    "keyNutrients": ["Vitamin A", "Iron"],
+    "healthBenefits": ["benefit 1", "benefit 2"]
+  },
+  "food2": {
+    "name": "${food2}",
+    "portion": "${portion2}",
+    "calories": number,
+    "protein": number,
+    "carbs": number,
+    "fats": number,
+    "fiber": number,
+    "keyNutrients": ["Vitamin C", "Calcium"],
+    "healthBenefits": ["benefit 1", "benefit 2"]
+  },
+  "comparison": {
+    "calorieWinner": "food1|food2",
+    "proteinWinner": "food1|food2",
+    "healthierChoice": "food1|food2",
+    "explanation": "Why one is healthier than the other"
+  },
+  "recommendation": "When to choose each food (2-3 sentences)"
+}`;
+
+    const text = await callGeminiWithRetry(prompt, { temperature: 0.3, maxOutputTokens: 2000 });
+    const cleanText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
+    
+    if (!jsonMatch) throw new Error('Invalid AI response');
+    const data = JSON.parse(jsonMatch[0]);
+
+    res.json({
+      success: true,
+      ...data,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Food Comparison error:', error);
+    res.status(500).json({ error: 'Failed to compare foods.', details: error.message });
+  }
+});
+
+// AI Diet Coach - Personalized diet advice based on goals
+app.post('/ai/diet-coach', async (req, res) => {
+  try {
+    const { 
+      goal = 'maintenance', // weightLoss, muscleGain, maintenance, healthyEating
+      currentWeight,
+      targetWeight,
+      activityLevel = 'moderate', // sedentary, light, moderate, active, veryActive
+      dietaryPreference = 'Standard',
+      challenges = []
+    } = req.body;
+
+    // Get recent meal data for context
+    const recentMeals = await Meal.find()
+      .sort({ timestamp: -1 })
+      .limit(14)
+      .lean();
+
+    const avgCalories = recentMeals.length > 0 
+      ? Math.round(recentMeals.reduce((sum, m) => sum + (m.totalCalories || 0), 0) / recentMeals.length)
+      : 'unknown';
+
+    const prompt = `You are a personal diet coach specializing in Indian nutrition. Provide personalized coaching.
+
+USER PROFILE:
+- Goal: ${goal}
+- Current Weight: ${currentWeight || 'Not specified'}
+- Target Weight: ${targetWeight || 'Not specified'}
+- Activity Level: ${activityLevel}
+- Dietary Preference: ${dietaryPreference}
+- Challenges: ${challenges.join(', ') || 'None specified'}
+- Average calories per meal (recent): ${avgCalories}
+
+Provide motivational, actionable coaching advice focused on Indian dietary habits.
+
+Return ONLY valid JSON:
+{
+  "greeting": "Personalized encouraging greeting",
+  "assessment": "Brief assessment of their situation",
+  "dailyCalorieTarget": number,
+  "macroTargets": {
+    "protein": "grams per day",
+    "carbs": "grams per day",
+    "fats": "grams per day"
+  },
+  "actionPlan": [
+    {
+      "priority": 1,
+      "action": "Specific action to take",
+      "reason": "Why this matters"
+    }
+  ],
+  "mealTiming": {
+    "breakfast": "7-8 AM - what to eat",
+    "lunch": "12-1 PM - what to eat",
+    "dinner": "7-8 PM - what to eat",
+    "snacks": "Healthy snack suggestions"
+  },
+  "weeklyGoals": ["Goal 1", "Goal 2", "Goal 3"],
+  "motivationalTip": "Encouraging message for the user",
+  "indianFoodsToPrioritize": ["food 1", "food 2", "food 3"],
+  "foodsToLimit": ["food 1", "food 2"]
+}`;
+
+    const text = await callGeminiWithRetry(prompt, { temperature: 0.7, maxOutputTokens: 2500 });
+    const cleanText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
+    
+    if (!jsonMatch) throw new Error('Invalid AI response');
+    const data = JSON.parse(jsonMatch[0]);
+
+    res.json({
+      success: true,
+      ...data,
+      mealsAnalyzed: recentMeals.length,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Diet Coach error:', error);
+    res.status(500).json({ error: 'Failed to generate diet coaching.', details: error.message });
+  }
+});
+
+// Smart Grocery List - Generate grocery list from meal plan
+app.post('/ai/grocery-list', async (req, res) => {
+  try {
+    const { 
+      days = 7,
+      mealsPerDay = 3,
+      dietaryPreference = 'Standard',
+      budget = 'medium', // low, medium, high
+      familySize = 2
+    } = req.body;
+
+    // Get favorite meals for personalization
+    const favoriteMeals = await FavoriteMeal.find().limit(5).lean();
+    const favoriteItems = favoriteMeals.flatMap(m => m.items?.map(i => i.name) || []);
+
+    let dietContext = '';
+    if (dietaryPreference === 'Jain') {
+      dietContext = 'EXCLUDE: onion, garlic, root vegetables, non-veg';
+    } else if (dietaryPreference === 'Vegan') {
+      dietContext = 'EXCLUDE: all dairy, eggs, honey';
+    }
+
+    const prompt = `You are an Indian home cook expert. Create a smart grocery shopping list.
+
+REQUIREMENTS:
+- Days to plan for: ${days}
+- Meals per day: ${mealsPerDay}
+- Family size: ${familySize}
+- Dietary Preference: ${dietaryPreference} ${dietContext}
+- Budget: ${budget}
+- User's favorite items: ${favoriteItems.join(', ') || 'Not available'}
+
+Create a comprehensive Indian grocery list organized by category.
+
+Return ONLY valid JSON:
+{
+  "groceryList": {
+    "vegetables": [
+      { "item": "Tomatoes", "quantity": "1 kg", "estimatedCost": 40 }
+    ],
+    "fruits": [],
+    "dairy": [],
+    "grains": [],
+    "pulses": [],
+    "spices": [],
+    "oils": [],
+    "others": []
+  },
+  "estimatedTotalCost": number,
+  "mealSuggestions": ["Meal 1", "Meal 2", "Meal 3"],
+  "shoppingTips": ["Tip 1", "Tip 2"],
+  "storageAdvice": "How to store items for the week"
+}`;
+
+    const text = await callGeminiWithRetry(prompt, { temperature: 0.7, maxOutputTokens: 3000 });
+    const cleanText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
+    
+    if (!jsonMatch) throw new Error('Invalid AI response');
+    const data = JSON.parse(jsonMatch[0]);
+
+    res.json({
+      success: true,
+      ...data,
+      parameters: { days, mealsPerDay, familySize, dietaryPreference, budget },
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Grocery List error:', error);
+    res.status(500).json({ error: 'Failed to generate grocery list.', details: error.message });
+  }
+});
 
 
