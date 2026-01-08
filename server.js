@@ -442,6 +442,15 @@ app.delete('/meals/:id', async (req, res) => {
   }
 });
 
+app.delete('/meals', async (req, res) => {
+  try {
+    const result = await Meal.deleteMany({});
+    res.json({ success: true, deletedCount: result.deletedCount });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/meals/stats', async (req, res) => {
   try {
     const { days = 7 } = req.query;
