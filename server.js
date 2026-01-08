@@ -769,7 +769,7 @@ function saveDailyTracker(tracker) {
 // GEMINI AI HELPER WITH RETRY LOGIC
 // ==========================================
 
-const AI_MODELS = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro', 'gemini-2.0-flash'];
+const AI_MODELS = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro', 'gemini-2.0-flash'];
 
 async function callGeminiWithRetry(prompt, config = {}) {
   const { temperature = 0.7, maxOutputTokens = 1000, retries = 2 } = config;
@@ -795,8 +795,8 @@ async function callGeminiWithRetry(prompt, config = {}) {
         lastError = error;
         console.log(`Model ${modelName} attempt ${attempt + 1} failed:`, error.message?.substring(0, 100));
         
-        // If rate limited, try next model immediately
-        if (error.status === 429) {
+        // If rate limited or service unavailable, try next model immediately
+        if (error.status === 429 || error.status === 503) {
           break; // Try next model
         }
       }
@@ -848,15 +848,6 @@ ${conversationHistory.map(m => `${m.role}: ${m.content}`).join('\n')}
 User question: ${message}
 
 Respond naturally as a helpful nutrition assistant:`;
-
-    const model = genAI.getGenerativeModel({ 
-      model: 'gemini-2.0-flash',
-      generationConfig: {
-        temperature: 0.7,
-        topP: 0.9,
-        maxOutputTokens: 500,
-      }
-    });
 
     const aiMessage = await callGeminiWithRetry(systemPrompt, { temperature: 0.7, maxOutputTokens: 500 });
 
