@@ -1694,4 +1694,514 @@ Return ONLY valid JSON:
   }
 });
 
+// ==========================================
+// PHASE 3: NEW AI FEATURES
+// ==========================================
+
+// AI Food Substitute - Healthier food alternatives
+app.post('/ai/food-substitute', async (req, res) => {
+  try {
+    const { 
+      food, 
+      reason = 'general health', // weightLoss, diabetes, heartHealth, general
+      dietaryPreference = 'Standard'
+    } = req.body;
+
+    if (!food || food.trim().length < 2) {
+      return res.status(400).json({ error: 'Please provide a food item to find substitutes for' });
+    }
+
+    let dietContext = '';
+    if (dietaryPreference === 'Jain') {
+      dietContext = 'All substitutes MUST follow Jain diet: NO onion, garlic, root vegetables.';
+    } else if (dietaryPreference === 'Vegan') {
+      dietContext = 'All substitutes MUST be Vegan: NO dairy, eggs, honey.';
+    }
+
+    const prompt = `You are an expert Indian nutritionist. Suggest 4 healthier alternatives for the given food.
+
+FOOD TO SUBSTITUTE: ${food}
+REASON FOR SUBSTITUTE: ${reason}
+DIETARY PREFERENCE: ${dietaryPreference}
+${dietContext}
+
+Provide healthier Indian food alternatives with nutritional benefits.
+
+Return ONLY valid JSON:
+{
+  "originalFood": {
+    "name": "${food}",
+    "calories": number (per serving),
+    "concerns": ["why it might not be ideal"]
+  },
+  "substitutes": [
+    {
+      "name": "Substitute food name",
+      "indianName": "Hindi/regional name if applicable",
+      "calories": number (per serving),
+      "caloriesSaved": number,
+      "benefits": ["benefit 1", "benefit 2"],
+      "howToUse": "How to use this as a substitute",
+      "taste": "similar|milder|different",
+      "availability": "easy|moderate|specialty"
+    }
+  ],
+  "bestChoice": "Name of the best substitute and why (1 line)",
+  "tip": "General tip for making this switch"
+}`;
+
+    const text = await callGeminiWithRetry(prompt, { temperature: 0.7, maxOutputTokens: 2000 });
+    const cleanText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
+    
+    if (!jsonMatch) throw new Error('Invalid AI response');
+    const data = JSON.parse(jsonMatch[0]);
+
+    res.json({
+      success: true,
+      ...data,
+      reason,
+      dietaryPreference,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Food Substitute error:', error);
+    res.status(500).json({ error: 'Failed to find food substitutes.', details: error.message });
+  }
+});
+
+// AI Meal Rating - Score meals with improvement tips
+app.post('/ai/meal-rating', async (req, res) => {
+  try {
+    const { 
+      items = [],
+      totalCalories = 0,
+      mealType = 'Lunch',
+      dietaryPreference = 'Standard',
+      goal = 'balanced' // balanced, weightLoss, muscleGain, energy
+    } = req.body;
+
+    if (items.length === 0) {
+      return res.status(400).json({ error: 'Please provide meal items to rate' });
+    }
+
+    const itemsList = items.map(i => `${i.name}: ${i.calories || 0} cal, P:${i.protein || 0}g, C:${i.carbs || 0}g, F:${i.fats || 0}g`).join('\n');
+
+    const prompt = `You are an expert Indian nutritionist. Rate this meal and provide improvement suggestions.
+
+MEAL DETAILS:
+Meal Type: ${mealType}
+Total Calories: ${totalCalories}
+Goal: ${goal}
+Dietary Preference: ${dietaryPreference}
+
+ITEMS:
+${itemsList}
+
+Rate the meal considering:
+1. Nutritional balance
+2. Portion appropriateness
+3. Goal alignment
+4. Indian nutritional guidelines
+
+Return ONLY valid JSON:
+{
+  "rating": number (1-10),
+  "grade": "A+|A|B+|B|C|D",
+  "summary": "One-line summary of the meal",
+  "strengths": ["strength 1", "strength 2"],
+  "improvements": [
+    {
+      "issue": "What's lacking or excessive",
+      "suggestion": "Specific improvement",
+      "impact": "How it helps"
+    }
+  ],
+  "missingNutrients": ["nutrient 1 to add"],
+  "indianTwist": "Suggest an Indian food addition to improve the meal",
+  "idealFor": "Who would this meal be perfect for",
+  "calorieVerdict": "too low|appropriate|too high",
+  "motivationalNote": "Encouraging message about the meal"
+}`;
+
+    const text = await callGeminiWithRetry(prompt, { temperature: 0.5, maxOutputTokens: 2000 });
+    const cleanText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
+    
+    if (!jsonMatch) throw new Error('Invalid AI response');
+    const data = JSON.parse(jsonMatch[0]);
+
+    res.json({
+      success: true,
+      ...data,
+      mealAnalyzed: { items, totalCalories, mealType },
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Meal Rating error:', error);
+    res.status(500).json({ error: 'Failed to rate meal.', details: error.message });
+  }
+});
+
+// AI Fasting Planner - Intermittent fasting support
+app.post('/ai/fasting-plan', async (req, res) => {
+  try {
+    const { 
+      protocol = '16:8', // 16:8, 18:6, 20:4, 5:2, OMAD
+      goal = 'weight loss',
+      wakeUpTime = '7:00 AM',
+      sleepTime = '11:00 PM',
+      lifestyle = 'moderate', // sedentary, moderate, active
+      dietaryPreference = 'Standard'
+    } = req.body;
+
+    const prompt = `You are an expert nutritionist specializing in intermittent fasting with Indian dietary context.
+
+CREATE A FASTING PLAN:
+Protocol: ${protocol}
+Goal: ${goal}
+Wake Up: ${wakeUpTime}
+Sleep: ${sleepTime}
+Lifestyle: ${lifestyle}
+Dietary Preference: ${dietaryPreference}
+
+Provide a personalized Indian intermittent fasting plan.
+
+Return ONLY valid JSON:
+{
+  "protocol": "${protocol}",
+  "fastingWindow": {
+    "start": "time",
+    "end": "time",
+    "duration": "X hours"
+  },
+  "eatingWindow": {
+    "start": "time", 
+    "end": "time",
+    "duration": "X hours"
+  },
+  "mealSchedule": [
+    {
+      "meal": "Break-fast/Meal 1",
+      "time": "Time",
+      "suggestions": ["Indian food suggestion 1", "suggestion 2"],
+      "calories": "approximate range",
+      "focus": "What nutrients to prioritize"
+    }
+  ],
+  "whatToHaveDuringFast": ["water", "black coffee", "green tea"],
+  "benefitsExpected": ["benefit 1", "benefit 2", "benefit 3"],
+  "weeklySchedule": {
+    "fastingDays": ["Mon", "Tue", etc],
+    "flexDays": ["optional break days"]
+  },
+  "tips": ["tip 1", "tip 2"],
+  "warnings": ["warning if applicable"],
+  "progressMilestones": [
+    { "week": 1, "expectation": "what to expect" }
+  ]
+}`;
+
+    const text = await callGeminiWithRetry(prompt, { temperature: 0.7, maxOutputTokens: 2500 });
+    const cleanText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
+    
+    if (!jsonMatch) throw new Error('Invalid AI response');
+    const data = JSON.parse(jsonMatch[0]);
+
+    res.json({
+      success: true,
+      ...data,
+      parameters: { protocol, goal, wakeUpTime, sleepTime, lifestyle, dietaryPreference },
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Fasting Plan error:', error);
+    res.status(500).json({ error: 'Failed to generate fasting plan.', details: error.message });
+  }
+});
+
+// AI Hydration Calculator - Personalized water intake
+app.post('/ai/hydration', async (req, res) => {
+  try {
+    const { 
+      weight, // in kg
+      activityLevel = 'moderate', // sedentary, light, moderate, active, athlete
+      climate = 'moderate', // hot, moderate, cold
+      healthConditions = [], // diabetes, kidney, heart
+      currentIntake = 0 // current water intake in liters
+    } = req.body;
+
+    if (!weight || weight < 20 || weight > 300) {
+      return res.status(400).json({ error: 'Please provide a valid weight (20-300 kg)' });
+    }
+
+    const prompt = `You are a hydration expert. Calculate personalized water intake.
+
+USER PROFILE:
+Weight: ${weight} kg
+Activity Level: ${activityLevel}
+Climate: ${climate}
+Health Conditions: ${healthConditions.join(', ') || 'None'}
+Current Daily Intake: ${currentIntake} liters
+
+Calculate optimal daily water intake with Indian context (considering chai, lassi, nimbu paani, etc.)
+
+Return ONLY valid JSON:
+{
+  "recommendedIntake": {
+    "liters": number,
+    "glasses": number (assuming 250ml glass),
+    "range": { "min": number, "max": number }
+  },
+  "breakdown": {
+    "baseNeed": "X liters (based on weight)",
+    "activityAddition": "X liters (for activity)",
+    "climateAdjustment": "X liters (for climate)"
+  },
+  "schedule": [
+    { "time": "7 AM", "amount": "250ml", "tip": "Start with warm water" }
+  ],
+  "indianBeverages": [
+    {
+      "name": "Beverage name",
+      "countAs": "How much it counts towards intake",
+      "benefits": "Hydration benefit",
+      "when": "Best time to have"
+    }
+  ],
+  "signs": {
+    "dehydration": ["sign 1", "sign 2"],
+    "overhydration": ["sign 1"]
+  },
+  "tips": ["hydration tip 1", "tip 2"],
+  "comparison": {
+    "currentVsRecommended": "${currentIntake > 0 ? 'comparison message' : 'Start tracking!'}",
+    "status": "good|needs improvement|concerning"
+  }
+}`;
+
+    const text = await callGeminiWithRetry(prompt, { temperature: 0.5, maxOutputTokens: 2000 });
+    const cleanText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
+    
+    if (!jsonMatch) throw new Error('Invalid AI response');
+    const data = JSON.parse(jsonMatch[0]);
+
+    res.json({
+      success: true,
+      ...data,
+      parameters: { weight, activityLevel, climate, healthConditions },
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Hydration error:', error);
+    res.status(500).json({ error: 'Failed to calculate hydration needs.', details: error.message });
+  }
+});
+
+// AI Allergen Checker - Detect allergens in food
+app.post('/ai/allergen-check', async (req, res) => {
+  try {
+    const { 
+      mealDescription,
+      knownAllergies = [] // dairy, gluten, nuts, shellfish, eggs, soy
+    } = req.body;
+
+    if (!mealDescription || mealDescription.trim().length < 3) {
+      return res.status(400).json({ error: 'Please provide a meal description' });
+    }
+
+    const prompt = `You are a food allergy expert. Analyze this meal for potential allergens.
+
+MEAL: ${mealDescription}
+USER'S KNOWN ALLERGIES: ${knownAllergies.join(', ') || 'None specified'}
+
+Identify all potential allergens with Indian food context (hidden dairy in naan, gluten in roti, etc.)
+
+Return ONLY valid JSON:
+{
+  "mealAnalyzed": "${mealDescription}",
+  "overallSafetyLevel": "safe|caution|warning|danger",
+  "detectedAllergens": [
+    {
+      "allergen": "Allergen name",
+      "severity": "common|moderate|severe",
+      "foundIn": ["which items contain it"],
+      "isKnownAllergy": true/false,
+      "details": "How it's present (e.g., ghee contains dairy)"
+    }
+  ],
+  "hiddenAllergens": [
+    {
+      "allergen": "Hidden allergen",
+      "commonlyFoundIn": "Indian foods that unexpectedly contain it",
+      "tipToAvoid": "How to avoid"
+    }
+  ],
+  "safeAlternatives": [
+    {
+      "for": "problematic item",
+      "substitute": "safe alternative",
+      "indianOption": "Indian food alternative"
+    }
+  ],
+  "questionsToAsk": ["Question to ask at restaurant"],
+  "crossContaminationRisk": "low|medium|high",
+  "emergencyAdvice": "What to do if reaction occurs"
+}`;
+
+    const text = await callGeminiWithRetry(prompt, { temperature: 0.3, maxOutputTokens: 2000 });
+    const cleanText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
+    
+    if (!jsonMatch) throw new Error('Invalid AI response');
+    const data = JSON.parse(jsonMatch[0]);
+
+    res.json({
+      success: true,
+      ...data,
+      userAllergies: knownAllergies,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Allergen Check error:', error);
+    res.status(500).json({ error: 'Failed to check allergens.', details: error.message });
+  }
+});
+
+// Enhanced Diet Coach with BMI and Progress Tracking
+app.post('/ai/diet-coach-enhanced', async (req, res) => {
+  try {
+    const { 
+      goal = 'maintenance',
+      currentWeight,
+      targetWeight,
+      height, // in cm
+      age,
+      gender = 'other',
+      activityLevel = 'moderate',
+      dietaryPreference = 'Standard',
+      challenges = [],
+      previousWeights = [] // array of {date, weight} for progress
+    } = req.body;
+
+    // Calculate BMI if height provided
+    let bmiData = null;
+    if (height && currentWeight) {
+      const heightM = height / 100;
+      const bmi = currentWeight / (heightM * heightM);
+      let category = 'normal';
+      if (bmi < 18.5) category = 'underweight';
+      else if (bmi >= 25 && bmi < 30) category = 'overweight';
+      else if (bmi >= 30) category = 'obese';
+      bmiData = { value: Math.round(bmi * 10) / 10, category };
+    }
+
+    // Calculate progress if previous weights available
+    let progressData = null;
+    if (previousWeights.length > 0) {
+      const firstWeight = previousWeights[0].weight;
+      const weightChange = currentWeight - firstWeight;
+      progressData = {
+        startWeight: firstWeight,
+        currentWeight,
+        change: Math.round(weightChange * 10) / 10,
+        direction: weightChange < 0 ? 'loss' : weightChange > 0 ? 'gain' : 'maintained'
+      };
+    }
+
+    const recentMeals = await Meal.find()
+      .sort({ timestamp: -1 })
+      .limit(14)
+      .lean();
+
+    const avgCalories = recentMeals.length > 0 
+      ? Math.round(recentMeals.reduce((sum, m) => sum + (m.totalCalories || 0), 0) / recentMeals.length)
+      : 'unknown';
+
+    const prompt = `You are a personal diet coach with expertise in Indian nutrition. Provide comprehensive coaching.
+
+USER PROFILE:
+- Goal: ${goal}
+- Current Weight: ${currentWeight || 'Not specified'} kg
+- Target Weight: ${targetWeight || 'Not specified'} kg
+- Height: ${height || 'Not specified'} cm
+- Age: ${age || 'Not specified'}
+- Gender: ${gender}
+- BMI: ${bmiData ? `${bmiData.value} (${bmiData.category})` : 'Not calculated'}
+- Activity Level: ${activityLevel}
+- Dietary Preference: ${dietaryPreference}
+- Challenges: ${challenges.join(', ') || 'None specified'}
+- Progress: ${progressData ? `${progressData.direction} of ${Math.abs(progressData.change)} kg` : 'No history'}
+- Average calories per meal: ${avgCalories}
+
+Provide personalized, motivational coaching with Indian dietary focus.
+
+Return ONLY valid JSON:
+{
+  "greeting": "Warm, personalized greeting",
+  "bmiAnalysis": {
+    "current": ${bmiData?.value || 'null'},
+    "category": "${bmiData?.category || 'unknown'}",
+    "idealRange": "18.5-24.9",
+    "interpretation": "What this means for the user"
+  },
+  "progressFeedback": "Feedback on their progress journey",
+  "dailyCalorieTarget": number,
+  "macroTargets": {
+    "protein": "grams",
+    "carbs": "grams", 
+    "fats": "grams"
+  },
+  "weeklyPlan": {
+    "focus": "This week's focus area",
+    "miniGoals": ["goal 1", "goal 2", "goal 3"]
+  },
+  "actionPlan": [
+    {
+      "priority": 1,
+      "action": "Specific action",
+      "reason": "Why important",
+      "indianTip": "Indian food related tip"
+    }
+  ],
+  "mealTiming": {
+    "breakfast": { "time": "7-8 AM", "suggestions": ["item 1"] },
+    "lunch": { "time": "12-1 PM", "suggestions": ["item 1"] },
+    "dinner": { "time": "7-8 PM", "suggestions": ["item 1"] },
+    "snacks": { "time": "4-5 PM", "suggestions": ["item 1"] }
+  },
+  "challengeSolutions": [
+    { "challenge": "user challenge", "solution": "specific solution" }
+  ],
+  "motivationalMessage": "Inspiring message",
+  "nextMilestone": {
+    "target": "Next weight/goal milestone",
+    "expectedTime": "When they might reach it",
+    "reward": "Suggested healthy reward"
+  }
+}`;
+
+    const text = await callGeminiWithRetry(prompt, { temperature: 0.7, maxOutputTokens: 3000 });
+    const cleanText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
+    
+    if (!jsonMatch) throw new Error('Invalid AI response');
+    const data = JSON.parse(jsonMatch[0]);
+
+    res.json({
+      success: true,
+      ...data,
+      calculatedBMI: bmiData,
+      progress: progressData,
+      mealsAnalyzed: recentMeals.length,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Enhanced Diet Coach error:', error);
+    res.status(500).json({ error: 'Failed to generate coaching.', details: error.message });
+  }
+});
+
 
