@@ -118,7 +118,7 @@ app.get('/list-models', (req, res) => {
 
 app.get('/test-api', async (req, res) => {
   try {
-    const testModel = genAI.getGenerativeModel({ model: 'gemini-pro' });
+    const testModel = genAI.getGenerativeModel({ model: 'gemini-flash-latest' });
     const result = await testModel.generateContent('Say "API is working"');
     const response = await result.response;
     res.json({ 
@@ -778,7 +778,7 @@ function saveDailyTracker(tracker) {
 // GEMINI AI HELPER WITH RETRY LOGIC
 // ==========================================
 
-const AI_MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite','gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro', 'gemini-2.0-flash'];
+const AI_MODELS = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash', 'gemini-flash-latest', 'gemini-pro-latest', 'gemini-2.5-flash-lite'];
 
 async function callGeminiWithRetry(prompt, config = {}) {
   const { temperature = 0.7, maxOutputTokens = 1000, retries = 2 } = config;
@@ -813,6 +813,246 @@ async function callGeminiWithRetry(prompt, config = {}) {
   }
 
   throw lastError || new Error('All AI models failed');
+}
+
+// Helper function for robust JSON parsing from AI responses
+function parseAIResponse(text) {
+  // Clean the text
+  let cleanText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+  
+  // Find JSON object
+  const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error('No JSON found in AI response');
+  
+  let jsonStr = jsonMatch[0];
+  
+  // Try to fix common JSON issues
+  // Remove trailing commas before closing brackets
+  jsonStr = jsonStr.replace(/,\s*([}\]])/g, '$1');
+  
+  // Try to parse
+  try {
+    return JSON.parse(jsonStr);
+  } catch (parseError) {
+    console.error('JSON parse error, attempting to fix truncated JSON:', parseError.message);
+    
+    // Find last complete property/element by tracking structure
+    let objDepth = 0;
+    let arrDepth = 0;
+    let inString = false;
+    let escapeNext = false;
+    let lastCompleteIndex = -1;
+    let lastCommaIndex = -1;
+    
+    for (let i = 0; i < jsonStr.length; i++) {
+      const char = jsonStr[i];
+      
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      
+      if (char === '\\') {
+        escapeNext = true;
+        continue;
+      }
+      
+      if (char === '"') {
+        inString = !inString;
+        continue;
+      }
+      
+      if (inString) continue;
+      
+      if (char === '{') {
+        objDepth++;
+      } else if (char === '}') {
+        objDepth--;
+        if (objDepth === 0 && arrDepth === 0) {
+          lastCompleteIndex = i;
+        }
+      } else if (char === '[') {
+        arrDepth++;
+      } else if (char === ']') {
+        arrDepth--;
+        if (objDepth === 0 && arrDepth === 0) {
+          lastCompleteIndex = i;
+        }
+      } else if (char === ',') {
+        if (objDepth > 0 || arrDepth > 0) {
+          lastCommaIndex = i;
+        }
+      }
+    }
+    
+    // If we're in an incomplete string or have incomplete property, find where to cut
+    if (inString || lastCompleteIndex < 0) {
+      // Find the last complete element by looking backwards for complete patterns
+      let cutIndex = -1;
+      let tempInString = false;
+      let tempEscapeNext = false;
+      
+      // Look backwards for the last complete property/element
+      // Pattern: value followed by , or } or ]
+      for (let i = jsonStr.length - 1; i >= 0; i--) {
+        const char = jsonStr[i];
+        
+        if (tempEscapeNext) {
+          tempEscapeNext = false;
+          continue;
+        }
+        
+        if (char === '\\') {
+          tempEscapeNext = true;
+          continue;
+        }
+        
+        if (char === '"') {
+          tempInString = !tempInString;
+          if (!tempInString) {
+            // Found closing quote, check if this completes a value
+            // Look ahead for comma, closing brace, or closing bracket
+            for (let j = i + 1; j < Math.min(i + 20, jsonStr.length); j++) {
+              const nextChar = jsonStr[j];
+              if (nextChar === ',' || nextChar === '}' || nextChar === ']') {
+                cutIndex = j;
+                break;
+              }
+              if (nextChar !== ' ' && nextChar !== '\n' && nextChar !== '\t' && nextChar !== '\r') {
+                break;
+              }
+            }
+            if (cutIndex >= 0) break;
+          }
+          continue;
+        }
+        
+        if (tempInString) continue;
+        
+        // Found a comma - this might be after a complete value
+        if (char === ',' && cutIndex < 0) {
+          // Check if there's a complete value before this comma
+          let hasValueBefore = false;
+          for (let j = i - 1; j >= Math.max(0, i - 30); j--) {
+            const prevChar = jsonStr[j];
+            if (prevChar === '"' || prevChar === '}' || prevChar === ']' || prevChar === ':' || (prevChar >= '0' && prevChar <= '9')) {
+              hasValueBefore = true;
+              break;
+            }
+            if (prevChar === '{' || prevChar === '[' || prevChar === ',') {
+              break;
+            }
+          }
+          if (hasValueBefore) {
+            cutIndex = i;
+            break;
+          }
+        }
+        
+        // Found closing brace/bracket - complete structure
+        if ((char === '}' || char === ']') && i < jsonStr.length - 5) {
+          cutIndex = i + 1;
+          break;
+        }
+      }
+      
+      if (cutIndex >= 0) {
+        jsonStr = jsonStr.substring(0, cutIndex);
+      } else if (lastCommaIndex >= 0) {
+        jsonStr = jsonStr.substring(0, lastCommaIndex);
+      } else if (lastCompleteIndex >= 0) {
+        jsonStr = jsonStr.substring(0, lastCompleteIndex + 1);
+      } else {
+        // Last resort: try to remove incomplete patterns
+        jsonStr = jsonStr.replace(/,\s*"[^"]*$/, '');
+        jsonStr = jsonStr.replace(/":\s*"[^"]*$/, '": ""');
+        jsonStr = jsonStr.replace(/":\s*[^,}\]]*$/, '');
+      }
+      
+      // Remove any incomplete key at the end (key without colon or value)
+      jsonStr = jsonStr.replace(/,\s*"[^"]*$/, '');
+      jsonStr = jsonStr.replace(/,\s*"[^"]*:\s*$/, '');
+    }
+    
+    // Recalculate depths after cutting
+    objDepth = 0;
+    arrDepth = 0;
+    inString = false;
+    escapeNext = false;
+    
+    for (let i = 0; i < jsonStr.length; i++) {
+      const char = jsonStr[i];
+      
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      
+      if (char === '\\') {
+        escapeNext = true;
+        continue;
+      }
+      
+      if (char === '"') {
+        inString = !inString;
+        continue;
+      }
+      
+      if (inString) continue;
+      
+      if (char === '{') objDepth++;
+      else if (char === '}') objDepth--;
+      else if (char === '[') arrDepth++;
+      else if (char === ']') arrDepth--;
+    }
+    
+    // Fix truncated primitive values (boolean, null, numbers)
+    // Handle truncated "false" (fal, fals, etc.)
+    jsonStr = jsonStr.replace(/:\s*fal[se]*\s*(?=[,}\]]|$)/gi, ': false');
+    jsonStr = jsonStr.replace(/:\s*fa\s*(?=[,}\]]|$)/gi, ': false');
+    jsonStr = jsonStr.replace(/:\s*f\s*(?=[,}\]]|$)/gi, ': false');
+    // Handle truncated "true" (tru, tr, etc.)
+    jsonStr = jsonStr.replace(/:\s*tru[e]*\s*(?=[,}\]]|$)/gi, ': true');
+    jsonStr = jsonStr.replace(/:\s*tr\s*(?=[,}\]]|$)/gi, ': true');
+    // Handle truncated "null" (nul, nu, etc.)
+    jsonStr = jsonStr.replace(/:\s*nul[l]*\s*(?=[,}\]]|$)/gi, ': null');
+    jsonStr = jsonStr.replace(/:\s*nu\s*(?=[,}\]]|$)/gi, ': null');
+    // Handle incomplete property values at end (": " followed by nothing useful)
+    jsonStr = jsonStr.replace(/:\s*[a-zA-Z]+\s*$/g, ': null');
+    // Handle properties with no value at end
+    jsonStr = jsonStr.replace(/:\s*$/g, ': null');
+    // Remove incomplete last property (key without value)
+    jsonStr = jsonStr.replace(/,\s*"[^"]*"\s*$/g, '');
+    jsonStr = jsonStr.replace(/,\s*"[^"]*"\s*:\s*$/g, '');
+    
+    // Remove trailing commas before closing structures
+    jsonStr = jsonStr.replace(/,\s*$/, '');
+    jsonStr = jsonStr.replace(/,\s*([}\]])/g, '$1');
+    
+    // Add missing closing brackets
+    while (arrDepth > 0) {
+      jsonStr += ']';
+      arrDepth--;
+    }
+    
+    // Add missing closing braces
+    while (objDepth > 0) {
+      jsonStr += '}';
+      objDepth--;
+    }
+    
+    // Final cleanup
+    jsonStr = jsonStr.replace(/,\s*([}\]])/g, '$1');
+    
+    try {
+      return JSON.parse(jsonStr);
+    } catch (secondError) {
+      console.error('Failed to fix JSON:', secondError.message);
+      console.error('Raw response preview:', text.substring(0, Math.min(1000, text.length)));
+      console.error('Fixed JSON preview:', jsonStr.substring(0, Math.min(1000, jsonStr.length)));
+      throw new Error('Invalid AI response format');
+    }
+  }
 }
 
 // ==========================================
@@ -1383,7 +1623,7 @@ app.post('/ai/recipe', async (req, res) => {
       ? 'User wants to use up leftovers. Suggest creative ways to combine these ingredients.'
       : '';
 
-    const prompt = `You are an expert Indian chef, nutritionist, and culinary educator. Create 4 healthy, delicious recipes using the given ingredients.
+    const prompt = `You are an expert Indian chef, nutritionist, and culinary educator. Create 1 healthy, delicious recipe using the given ingredients. Keep the response complete and well-formatted.
 
 AVAILABLE INGREDIENTS:
 ${ingredients.join(', ')}
@@ -1486,19 +1726,8 @@ Return ONLY valid JSON with comprehensive recipe data:
   "aiChefNote": "Personalized note about these recipes"
 }`;
 
-    const text = await callGeminiWithRetry(prompt, { temperature: 0.8, maxOutputTokens: 5000 });
-    const cleanText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
-    
-    if (!jsonMatch) throw new Error('Invalid AI response');
-    
-    let data;
-    try {
-      data = JSON.parse(jsonMatch[0]);
-    } catch (parseError) {
-      console.error('JSON parse error:', parseError.message);
-      throw new Error('Invalid AI response format');
-    }
+    const text = await callGeminiWithRetry(prompt, { temperature: 0.8, maxOutputTokens: 8000 });
+    const data = parseAIResponse(text);
 
     res.json({
       success: true,
@@ -1924,20 +2153,8 @@ Return ONLY valid JSON:
   }
 }`;
 
-    const text = await callGeminiWithRetry(prompt, { temperature: 0.7, maxOutputTokens: 4000 });
-    const cleanText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
-    
-    if (!jsonMatch) throw new Error('Invalid AI response');
-    
-    let data;
-    try {
-      data = JSON.parse(jsonMatch[0]);
-    } catch (parseError) {
-      console.error('JSON parse error:', parseError.message);
-      console.error('Response text:', cleanText.substring(0, 500));
-      throw new Error('Invalid AI response format: ' + parseError.message);
-    }
+    const text = await callGeminiWithRetry(prompt, { temperature: 0.7, maxOutputTokens: 8000 });
+    const data = parseAIResponse(text);
 
     res.json({
       success: true,
